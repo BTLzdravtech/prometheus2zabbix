@@ -12,6 +12,7 @@ DEFAULT_TEMPLATE_NAME = 'Template My Application'
 DEFAULT_TEMPLATE_MASTER_KEY = 'http_raw_prometheus_metrics'
 DEFAULT_TEMPLATE_APPLICATION_TAG = ''
 DEFAULT_METRICS_URL = 'http://localhost:9000/metrics'
+DEFAULT_BEARER_TOKEN = ''
 
 
 cmd_parser = ArgumentParser(
@@ -22,10 +23,16 @@ cmd_parser.add_argument('-u', '--url', metavar='METRICS_URL', action='store', de
 cmd_parser.add_argument('-n', '--name', metavar='TEMPLATE_NAME', action='store', default=DEFAULT_TEMPLATE_NAME)
 cmd_parser.add_argument('-m', '--master-key', metavar='ITEM_MASTER_KEY', action='store', default=DEFAULT_TEMPLATE_MASTER_KEY)
 cmd_parser.add_argument('-t', '--tag', metavar='APPLICATION_TAG', action='store', default=DEFAULT_TEMPLATE_APPLICATION_TAG)
+cmd_parser.add_argument('-b', '--bearer', metavar='BEARER_TOKEN', action='store', default=DEFAULT_BEARER_TOKEN)
+cmd_parser.add_argument('-o', '--output', metavar='OUTPUT', action='store')
 args = cmd_parser.parse_args()
 
-def get_schema(url):
-    metrics = requests.get(url).content
+def get_schema(url, bearer):
+    if not bearer:
+        metrics = requests.get(url, verify=False).content
+    else:
+        headers = {"Authorization": f"Bearer {bearer}"}
+        metrics = requests.get(url, headers=headers, verify=False).content
     schema = []
     for family in text_string_to_metric_families(metrics.decode('utf-8')):
         schema.append({
@@ -86,12 +93,12 @@ class Zabbix60Template():
             'tags': self.tags
         }
     
-    def build(self, url=DEFAULT_METRICS_URL):
+    def build(self, url=DEFAULT_METRICS_URL, bearer=DEFAULT_BEARER_TOKEN):
 
-        schema = get_schema(url)
+        schema = get_schema(url, bearer)
         parsed_url = urlparse(url)
 
-        self.template['zabbix_export']['templates'][0]['items'].append({
+        item = {
             'uuid': gen_uuid(),
             'name': self.master_key,
             'type': 'HTTP_AGENT',
@@ -99,8 +106,18 @@ class Zabbix60Template():
             'trends': '0',
             'history': '0',
             'value_type': 'TEXT',
-            'url': f'{parsed_url.scheme}://{{HOST.NAME}}:{parsed_url.port}{parsed_url.path}'
-        })
+            'url': f'{parsed_url.scheme}://{{HOST.NAME}}{f":{parsed_url.port}" if parsed_url.port else ""}{parsed_url.path}'
+        }
+        if bearer:
+            item['headers'] = [{
+                'name': 'Authorization',
+                'value': 'Bearer {$BEARER}'
+            }]
+            self.template['zabbix_export']['templates'][0]['macros'] = [{
+                'macro': '{$BEARER}',
+                'value': 'dummy'
+            }]
+        self.template['zabbix_export']['templates'][0]['items'].append(item)
         for prom_metric in schema:
             if len(prom_metric['labels']) == 0:
                 self.template['zabbix_export']['templates'][0]['items'].append(self.build_item(prom_metric))
@@ -164,7 +181,7 @@ class Zabbix60Template():
         return discovery_rule
 
 
-
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 tags = []
 if len(args.tag) > 0:
     tags.append({
@@ -177,5 +194,9 @@ template = Zabbix60Template(
     master_key=args.master_key,
     tags=tags
     )
-template.build(args.url)
-print(template.to_yaml())
+template.build(args.url, args.bearer)
+if args.output:
+    with open(args.output, 'w') as f:
+        f.write(template.to_yaml())
+else:
+    print(template.to_yaml())
